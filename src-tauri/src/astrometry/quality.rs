@@ -35,7 +35,22 @@ pub struct AstrometricQuality {
     pub mean_ra_arcsec: f64,
     pub mean_dec_arcsec: f64,
     pub spatial_trend_arcsec: f64,
+    /// Escalation trigger, not a rejection reason by itself. A SIP order is
+    /// fitted when the spatial residual trend exceeds the 0.30 arcsec
+    /// threshold; the solution is only rejected when the trend persists at the
+    /// requested maximum order (or the fitted polynomial is implausible).
     pub distortion_suspected: bool,
+    pub plate_model_requested: String,
+    pub plate_model_applied: String,
+    pub sip_order: Option<usize>,
+    pub sip_escalation_attempted: bool,
+    pub sip_escalation_succeeded: bool,
+    /// `None` when no SIP distortion was fitted, otherwise whether the
+    /// alternating CD/polynomial fit converged. A non-converged fit is never
+    /// accepted, so `Some(false)` always accompanies a rejection.
+    pub sip_fit_converged: Option<bool>,
+    pub plate_model_downgraded: bool,
+    pub plate_model_downgrade_reason: Option<String>,
     pub reasons: Vec<String>,
 }
 
@@ -167,6 +182,14 @@ pub fn evaluate_astrometric_quality(
         mean_dec_arcsec: mean_dec,
         spatial_trend_arcsec: spatial_trend,
         distortion_suspected,
+        plate_model_requested: "linear".into(),
+        plate_model_applied: "linear".into(),
+        sip_order: None,
+        sip_escalation_attempted: false,
+        sip_escalation_succeeded: false,
+        sip_fit_converged: None,
+        plate_model_downgraded: false,
+        plate_model_downgrade_reason: None,
         reasons,
     }
 }
