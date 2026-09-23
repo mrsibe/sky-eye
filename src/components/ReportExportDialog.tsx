@@ -4,6 +4,8 @@ import { Button } from './ui/button'
 interface Props {
   format: ReportFormat
   preview: string
+  warnings: string[]
+  error: string | null
   busy: boolean
   onFormatChange: (format: ReportFormat) => void
   onExport: () => void
@@ -13,6 +15,8 @@ interface Props {
 export function ReportExportDialog({
   format,
   preview,
+  warnings,
+  error,
   busy,
   onFormatChange,
   onExport,
@@ -60,16 +64,45 @@ export function ReportExportDialog({
             {format === 'ades2022_psv' ? '.psv' : '.txt'}
           </span>
         </div>
+        {!error && warnings.length > 0 && (
+          <div
+            role="status"
+            className="max-h-32 shrink-0 overflow-auto border-b border-sky-hairline bg-sky-canvas px-5 py-2.5"
+          >
+            <p className="text-label font-medium text-sky-warning">
+              {warnings.length} 条提示 · 不阻断导出
+            </p>
+            <ul className="mt-1 space-y-0.5">
+              {warnings.map((warning, index) => (
+                <li key={index} className="text-caption-mono leading-5 text-sky-body">
+                  {warning}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
         <div className="min-h-0 flex-1 p-4">
-          <pre className="h-full overflow-auto rounded-md border border-sky-hairline-strong bg-sky-canvas px-4 py-3 text-caption-mono leading-5 text-sky-body">
-            {preview || (busy ? '正在生成预览…' : '当前测量无法生成预览。')}
-          </pre>
+          {error ? (
+            <div
+              role="alert"
+              className="h-full overflow-auto rounded-md border border-sky-error bg-sky-canvas px-4 py-3"
+            >
+              <p className="text-body-sm font-medium text-sky-error">校验未通过</p>
+              <p className="mt-2 whitespace-pre-wrap text-caption-mono leading-5 text-sky-body">
+                {error}
+              </p>
+            </div>
+          ) : (
+            <pre className="h-full overflow-auto rounded-md border border-sky-hairline-strong bg-sky-canvas px-4 py-3 text-caption-mono leading-5 text-sky-body">
+              {preview || (busy ? '正在生成预览…' : '当前测量无法生成预览。')}
+            </pre>
+          )}
         </div>
         <footer className="flex shrink-0 justify-end gap-2 border-t border-sky-hairline px-5 py-3">
           <span className="mr-auto self-center text-label text-sky-mute">
             打开窗口或切换格式时自动校验并刷新
           </span>
-          <Button variant="primary" size="sm" onClick={onExport} disabled={busy}>
+          <Button variant="primary" size="sm" onClick={onExport} disabled={busy || error != null}>
             {busy ? '处理中…' : '导出文件'}
           </Button>
         </footer>
