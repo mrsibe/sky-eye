@@ -158,6 +158,7 @@ pub struct SolveParams {
     pub catalog_faint_limit_mag: Option<f32>,
     pub maximum_reference_stars: Option<usize>,
     pub astrometric_residual_limit_arcsec: Option<f64>,
+    pub plate_model: Option<matcher::PlateModel>,
     /// An explicit operator decision to accept a statistically sound solution
     /// that did not meet the automatic reference-count/coverage gate.
     pub accept_review: Option<bool>,
@@ -1989,8 +1990,11 @@ async fn solve_frame(
         .map_err(|error| error.to_string())?;
     let num_catalog = catalog.sources.len() as u32;
     let available = detection.astrometry_stars.len();
-    let reference_limits =
-        reference_count_attempts(available, params.maximum_reference_stars.unwrap_or(200));
+    let reference_limits = reference_count_attempts(
+        available,
+        params.maximum_reference_stars.unwrap_or(200),
+        params.plate_model.unwrap_or_default(),
+    );
     let seed = initial_wcs_seed(
         &params,
         upstream_seed,
@@ -2070,18 +2074,12 @@ fn compute_plate_solution(
                 &detection.astrometry_stars,
                 &catalog_sources,
                 seed.clone(),
-                matcher::MatchConfig {
-                    max_image_sources: *reference_limit,
-                    // A manual/seeded alignment already constrains the transform.
-                    // Keep the image list selective, but search a wider Gaia pool
-                    // so saturated or otherwise missing bright stars do not crowd
-                    // the real counterparts out of both equally-sized lists.
-                    max_catalog_sources: catalog_sources.len().min(256),
+                seeded_match_config(
+                    &params,
+                    *reference_limit,
                     maximum_rms_arcsec,
-                    catalog_bright_limit_mag: params.catalog_bright_limit_mag,
-                    catalog_faint_limit_mag: params.catalog_faint_limit_mag,
-                    ..matcher::MatchConfig::default()
-                },
+                    catalog_sources.len(),
+                ),
             ) {
                 Ok(solution) => {
                     let candidate =
@@ -2114,17 +2112,14 @@ fn compute_plate_solution(
             dec_deg,
             image_width,
             image_height,
-            matcher::MatchConfig {
-                max_image_sources: reference_limit,
-                max_catalog_sources: reference_limit,
+            automatic_match_config(
+                &params,
+                reference_limit,
                 maximum_rms_arcsec,
-                pixel_scale_hint_arcsec: pixel_scale_arcsec,
-                rotation_hint_deg: rotation_deg,
-                parity_hint: parity_flipped,
-                catalog_bright_limit_mag: params.catalog_bright_limit_mag,
-                catalog_faint_limit_mag: params.catalog_faint_limit_mag,
-                ..matcher::MatchConfig::default()
-            },
+                pixel_scale_arcsec,
+                rotation_deg,
+                parity_flipped,
+            ),
         ) {
             Ok(solution) => {
                 let candidate =
@@ -2141,15 +2136,71 @@ fn compute_plate_solution(
     best_result.unwrap_or_else(|| platesolve::match_failed(num_catalog, last_error))
 }
 
-fn reference_count_attempts(available: usize, configured_maximum: usize) -> Vec<usize> {
+fn reference_count_attempts(
+    available: usize,
+    configured_maximum: usize,
+    plate_model: matcher::PlateModel,
+) -> Vec<usize> {
     let maximum = available.min(configured_maximum.clamp(8, 500));
-    let mut attempts: Vec<_> = [50, 90, 140, 200]
-        .into_iter()
+    // Higher-order plate models need more validated references (36 for
+    // quadratic, 60 for cubic), so widen the candidate pool rather than
+    // lowering any acceptance gate when the requested order allows it.
+    let mut tiers: Vec<usize> = if plate_model == matcher::PlateModel::Linear {
+        vec![50, 90, 140, 200]
+    } else {
+        vec![50, 90, 140, 200, 280, 360, 500]
+    };
+    let mut attempts: Vec<_> = tiers
+        .drain(..)
         .map(|limit| limit.min(maximum))
         .filter(|limit| *limit >= 4)
         .collect();
     attempts.dedup();
     attempts
+}
+
+fn seeded_match_config(
+    params: &SolveParams,
+    reference_limit: usize,
+    maximum_rms_arcsec: f64,
+    catalog_len: usize,
+) -> matcher::MatchConfig {
+    matcher::MatchConfig {
+        max_image_sources: reference_limit,
+        // A manual/seeded alignment already constrains the transform. Keep the
+        // image list selective, but search a wider Gaia pool so saturated or
+        // otherwise missing bright stars do not crowd the real counterparts out
+        // of both equally-sized lists.
+        max_catalog_sources: catalog_len.min(256),
+        maximum_rms_arcsec,
+        catalog_bright_limit_mag: params.catalog_bright_limit_mag,
+        catalog_faint_limit_mag: params.catalog_faint_limit_mag,
+        plate_model: params.plate_model.unwrap_or_default(),
+        ..matcher::MatchConfig::default()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn automatic_match_config(
+    params: &SolveParams,
+    reference_limit: usize,
+    maximum_rms_arcsec: f64,
+    pixel_scale_arcsec: Option<f64>,
+    rotation_deg: Option<f64>,
+    parity_flipped: Option<bool>,
+) -> matcher::MatchConfig {
+    matcher::MatchConfig {
+        max_image_sources: reference_limit,
+        max_catalog_sources: reference_limit,
+        maximum_rms_arcsec,
+        pixel_scale_hint_arcsec: pixel_scale_arcsec,
+        rotation_hint_deg: rotation_deg,
+        parity_hint: parity_flipped,
+        catalog_bright_limit_mag: params.catalog_bright_limit_mag,
+        catalog_faint_limit_mag: params.catalog_faint_limit_mag,
+        plate_model: params.plate_model.unwrap_or_default(),
+        ..matcher::MatchConfig::default()
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2633,6 +2684,13 @@ pub async fn reduce_all_frames(
     if params.astrometric_residual_limit_arcsec.is_none() {
         params.astrometric_residual_limit_arcsec =
             Some(settings.reduction.astrometric_residual_limit_arcsec);
+    }
+    if params.plate_model.is_none() {
+        params.plate_model = Some(match settings.reduction.plate_model.as_str() {
+            "quadratic" => matcher::PlateModel::Quadratic,
+            "cubic" => matcher::PlateModel::Cubic,
+            _ => matcher::PlateModel::Linear,
+        });
     }
 
     let logs_dir = crate::storage::layout(&app)?.logs_dir;
@@ -3167,10 +3225,12 @@ pub fn blink_get_state(state: State<AppState>) -> Result<BlinkState, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_frame_async, detection_revision, midpoint_adjustment_seconds, midpoint_rfc3339,
-        reference_count_attempts, solve_frame, AppState, DetectionRevisionInput, FrameAnalysis,
+        automatic_match_config, detect_frame_async, detection_revision,
+        midpoint_adjustment_seconds, midpoint_rfc3339, reference_count_attempts,
+        seeded_match_config, solve_frame, AppState, DetectionRevisionInput, FrameAnalysis,
         SolveParams, DETECTION_ALGORITHM_VERSION,
     };
+    use crate::astrometry::matcher::PlateModel;
     use crate::{fits, project::sha256_file};
     use serde::Deserialize;
     use std::path::PathBuf;
@@ -3222,12 +3282,48 @@ mod tests {
 
     #[test]
     fn reference_count_retries_expand_without_exceeding_available_sources() {
-        assert_eq!(reference_count_attempts(3, 200), Vec::<usize>::new());
-        assert_eq!(reference_count_attempts(30, 200), vec![30]);
-        assert_eq!(reference_count_attempts(70, 200), vec![50, 70]);
-        assert_eq!(reference_count_attempts(160, 200), vec![50, 90, 140, 160]);
-        assert_eq!(reference_count_attempts(500, 200), vec![50, 90, 140, 200]);
-        assert_eq!(reference_count_attempts(500, 100), vec![50, 90, 100]);
+        assert_eq!(
+            reference_count_attempts(3, 200, PlateModel::Linear),
+            Vec::<usize>::new()
+        );
+        assert_eq!(
+            reference_count_attempts(30, 200, PlateModel::Linear),
+            vec![30]
+        );
+        assert_eq!(
+            reference_count_attempts(70, 200, PlateModel::Linear),
+            vec![50, 70]
+        );
+        assert_eq!(
+            reference_count_attempts(160, 200, PlateModel::Linear),
+            vec![50, 90, 140, 160]
+        );
+        assert_eq!(
+            reference_count_attempts(500, 200, PlateModel::Linear),
+            vec![50, 90, 140, 200]
+        );
+        assert_eq!(
+            reference_count_attempts(500, 100, PlateModel::Linear),
+            vec![50, 90, 100]
+        );
+        assert_eq!(
+            reference_count_attempts(500, 500, PlateModel::Cubic),
+            vec![50, 90, 140, 200, 280, 360, 500]
+        );
+    }
+
+    #[test]
+    fn plate_model_reaches_match_config_from_solve_params() {
+        let params = SolveParams {
+            plate_model: Some(PlateModel::Cubic),
+            ..SolveParams::default()
+        };
+        let seeded = seeded_match_config(&params, 120, 0.5, 400);
+        let automatic = automatic_match_config(&params, 120, 0.5, None, None, None);
+        assert_eq!(seeded.plate_model, PlateModel::Cubic);
+        assert_eq!(automatic.plate_model, PlateModel::Cubic);
+        assert_eq!(automatic.max_image_sources, 120);
+        assert_eq!(automatic.max_catalog_sources, 120);
     }
 
     #[test]

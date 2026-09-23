@@ -64,44 +64,84 @@ pub fn solved(
     solution: AstrometricSolution,
     sources: &[SourceMeasurement],
 ) -> PlateSolveResult {
-    let quality = evaluate_astrometric_quality(
+    let mut quality = evaluate_astrometric_quality(
         &solution.matches,
         sources,
         solution.wcs.image_width,
         solution.wcs.image_height,
     );
+    quality.plate_model_requested = solution.plate_model_requested.as_str().to_string();
+    quality.plate_model_applied = solution.plate_model_applied.as_str().to_string();
+    quality.sip_order = solution.sip_order;
+    quality.sip_escalation_attempted = solution.sip_escalation_attempted;
+    quality.sip_escalation_succeeded = solution.sip_escalation_succeeded;
+    quality.sip_fit_converged = solution.sip_fit_converged;
+    quality.plate_model_downgraded = solution.plate_model_downgraded;
+    quality.plate_model_downgrade_reason = solution.plate_model_downgrade_reason.clone();
+
     let accepted = quality.status == ReductionStatus::Accepted;
+    let sip_label = solution.sip_order.map(|order| match order {
+        2 => "二阶",
+        3 => "三阶",
+        _ => "SIP",
+    });
+    let downgrade_note = solution
+        .plate_model_downgrade_reason
+        .as_deref()
+        .map(|reason| format!("；板模型已降级：{reason}"))
+        .unwrap_or_default();
+    let rejection_reason = solution.sip_rejection_reason.clone();
+    let failure_code = (!accepted).then(|| {
+        match rejection_reason.as_deref() {
+            Some("implausible_distortion") => "implausible_distortion",
+            Some("sip_fit_not_converged") => "sip_fit_not_converged",
+            _ if quality.distortion_suspected => "distortion_suspected",
+            _ => "quality_gate",
+        }
+        .to_string()
+    });
     let message = match quality.status {
-        ReductionStatus::Accepted => format!(
-            "归算通过：匹配 {} 颗参考星，RMS {:.3} arcsec，P95 {:.3} arcsec。",
-            solution.matches.len(),
-            quality.residual_rms_arcsec,
-            quality.residual_p95_arcsec
-        ),
+        ReductionStatus::Accepted => match sip_label {
+            Some(label) => format!(
+                "归算通过（{label} SIP 畸变校正）：匹配 {} 颗参考星，RMS {:.3} arcsec，P95 {:.3} arcsec。{downgrade_note}",
+                solution.matches.len(),
+                quality.residual_rms_arcsec,
+                quality.residual_p95_arcsec
+            ),
+            None => format!(
+                "归算通过：匹配 {} 颗参考星，RMS {:.3} arcsec，P95 {:.3} arcsec。{downgrade_note}",
+                solution.matches.len(),
+                quality.residual_rms_arcsec,
+                quality.residual_p95_arcsec
+            ),
+        },
         ReductionStatus::ReviewRequired => format!(
-            "归算需要复核：匹配 {} 颗参考星，RMS {:.3} arcsec；{}",
+            "归算需要复核：匹配 {} 颗参考星，RMS {:.3} arcsec；{}{downgrade_note}",
             solution.matches.len(),
             quality.residual_rms_arcsec,
             quality.reasons.join("；")
         ),
-        ReductionStatus::Rejected => format!("归算被拒绝：{}", quality.reasons.join("；")),
+        ReductionStatus::Rejected => match rejection_reason.as_deref() {
+            Some("implausible_distortion") => {
+                format!("归算被拒绝：拟合出的畸变模型不物理（角点偏移过大或径向修正非单调）{downgrade_note}")
+            }
+            Some("sip_fit_not_converged") => {
+                format!("归算被拒绝：SIP 畸变拟合未收敛，未采用不确定的畸变模型{downgrade_note}")
+            }
+            _ => format!("归算被拒绝：{}{downgrade_note}", quality.reasons.join("；")),
+        },
     };
+    let num_matched = solution.matches.len() as u32;
+    let residual_rms = Some(solution.rms_arcsec);
     PlateSolveResult {
         run_id: None,
         success: accepted,
         status: quality.status,
-        failure_code: (!accepted).then(|| {
-            if quality.distortion_suspected {
-                "distortion_suspected"
-            } else {
-                "quality_gate"
-            }
-            .into()
-        }),
+        failure_code,
         wcs: Some(solution.wcs),
-        num_matched: solution.matches.len() as u32,
+        num_matched,
         num_catalog,
-        residual_rms: Some(solution.rms_arcsec),
+        residual_rms,
         backend: Some(
             "extended Delaunay / hinted pair voting + iterative robust TAN/CD".to_string(),
         ),
