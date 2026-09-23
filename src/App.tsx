@@ -146,6 +146,8 @@ function App() {
   const [reportOpen, setReportOpen] = useState(false)
   const [reportFormat, setReportFormat] = useState<ReportFormat>('ades2022_psv')
   const [reportPreview, setReportPreview] = useState('')
+  const [reportWarnings, setReportWarnings] = useState<string[]>([])
+  const [reportError, setReportError] = useState<string | null>(null)
   const [reportBusy, setReportBusy] = useState(false)
   const manualFrameIndex = useRef<number | null>(null)
   const lastSolveParams = useRef<SolveParams>({})
@@ -168,7 +170,12 @@ function App() {
     (total, objects) => total + objects.length,
     0,
   )
-  const reportMeasurements = measurements.filter((measurement) => !measurement.stale)
+  // 必须 memo：reportObservations 以它为依赖，非 memo 会在每次渲染产生新数组，
+  // 导致下面的预览 effect 依赖恒变 → 无限重跑（预览闪烁/错误弹窗死循环）。
+  const reportMeasurements = useMemo(
+    () => measurements.filter((measurement) => !measurement.stale),
+    [measurements],
+  )
   const reportContext = useMemo<ReportContext | null>(
     () =>
       appConfig
@@ -695,14 +702,23 @@ function App() {
     if (!appConfig) return
     setReportFormat(appConfig.report.default_format)
     setReportPreview('')
+    setReportWarnings([])
+    setReportError(null)
     setReportOpen(true)
   }, [appConfig])
+  const closeReportDialog = useCallback(() => {
+    setReportOpen(false)
+    setReportWarnings([])
+    setReportError(null)
+  }, [])
   const handleReportExport = useCallback(async () => {
     if (!reportContext) return
     setReportBusy(true)
+    setReportError(null)
     try {
       const preview = await previewReport(reportFormat, reportContext, reportObservations)
-      setReportPreview(preview)
+      setReportPreview(preview.content)
+      setReportWarnings(preview.warnings)
       const extension = reportFormat === 'ades2022_psv' ? 'psv' : 'txt'
       const destination = await saveDialog({
         defaultPath: `skyeye-observations.${extension}`,
@@ -718,23 +734,29 @@ function App() {
       setReportOpen(false)
       setReductionMessage(`观测报告已导出：${destination}`)
     } catch (e) {
-      setError(String(e))
+      // 报告校验/写入失败留在对话框内展示，避免在报告弹窗之上再叠全局错误弹窗
+      setReportError(String(e))
     } finally {
       setReportBusy(false)
     }
-  }, [reportContext, reportFormat, reportObservations, setError])
+  }, [reportContext, reportFormat, reportObservations])
 
   useEffect(() => {
     if (!reportOpen || !reportContext) return
     let active = true
     setReportPreview('')
+    setReportWarnings([])
+    setReportError(null)
     setReportBusy(true)
     void previewReport(reportFormat, reportContext, reportObservations)
       .then((preview) => {
-        if (active) setReportPreview(preview)
+        if (active) {
+          setReportPreview(preview.content)
+          setReportWarnings(preview.warnings)
+        }
       })
       .catch((error) => {
-        if (active) setError(String(error))
+        if (active) setReportError(String(error))
       })
       .finally(() => {
         if (active) setReportBusy(false)
@@ -742,7 +764,16 @@ function App() {
     return () => {
       active = false
     }
-  }, [reportOpen, reportFormat, reportContext, reportObservations, setError])
+  }, [
+    reportOpen,
+    reportFormat,
+    reportContext,
+    reportObservations,
+    setReportPreview,
+    setReportWarnings,
+    setReportError,
+    setReportBusy,
+  ])
 
   const beginManualCalibration = useCallback(
     async (frameIndex: number, solveParams: SolveParams) => {
@@ -1249,10 +1280,12 @@ function App() {
           <ReportExportDialog
             format={reportFormat}
             preview={reportPreview}
+            warnings={reportWarnings}
+            error={reportError}
             busy={reportBusy}
             onFormatChange={setReportFormat}
             onExport={handleReportExport}
-            onClose={() => setReportOpen(false)}
+            onClose={closeReportDialog}
           />
         )}
 

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 
 use crate::measurement::normalize_tracklet_designation;
+use crate::report::{RenderedReport, MPC_ACCEPTED_BANDS};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AdesContext {
@@ -49,10 +49,10 @@ pub struct AdesRequest {
     pub observations: Vec<AdesObservation>,
 }
 
-pub fn render(req: &AdesRequest) -> Result<String, Vec<String>> {
-    let mut errors = validate(req);
+pub fn render(req: &AdesRequest) -> Result<RenderedReport, Vec<String>> {
+    let errors = validate(req);
     if !errors.is_empty() {
-        return Err(std::mem::take(&mut errors));
+        return Err(errors);
     }
     let cols = [
         "permID", "provID", "trkSub", "mode", "stn", "obsTime", "ra", "dec", "rmsRA", "rmsDec",
@@ -142,7 +142,10 @@ pub fn render(req: &AdesRequest) -> Result<String, Vec<String>> {
         out.push_str(&values.join("|"));
         out.push('\n');
     }
-    Ok(out)
+    Ok(RenderedReport {
+        content: out,
+        warnings: warnings(req),
+    })
 }
 fn s(v: &Option<String>) -> String {
     v.clone().unwrap_or_default()
@@ -157,18 +160,50 @@ pub fn validate(req: &AdesRequest) -> Vec<String> {
         e.push("缺少 MPC 台站代码".into());
     } else if observatory_code.eq_ignore_ascii_case("XXX") {
         e.push("MPC 台站代码仍为占位值 XXX".into());
+    } else if !(3..=4).contains(&observatory_code.len())
+        || !observatory_code.chars().all(|c| c.is_ascii_alphanumeric())
+    {
+        e.push("ADES 台站代码必须是 3-4 位字母数字".into());
     }
     if req.context.submitter.trim().is_empty() {
         e.push("缺少提交者".into());
     }
+    // ADES `obsContext` requires `measurers` and `telescope` (design + aperture
+    // + detector). `observers` is deliberately optional there, unlike the MPC
+    // 80-column header, so its absence is not an error in this format.
+    if req.context.measurers.is_empty() {
+        e.push("ADES 要求至少一位测量者（measurers）".into());
+    }
+    if req
+        .context
+        .telescope
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        e.push("ADES 要求填写望远镜（telescope design）".into());
+    }
+    if !req
+        .context
+        .telescope_aperture_m
+        .is_some_and(|aperture| aperture > 0.0)
+    {
+        e.push("ADES 要求填写望远镜口径（aperture > 0）".into());
+    }
+    if req
+        .context
+        .detector
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        e.push("ADES 要求填写探测器（detector）".into());
+    }
     if req.observations.is_empty() {
         e.push("没有可导出的观测".into());
     }
-    let bands: HashSet<&str> = [
-        "U", "B", "V", "G", "R", "I", "J", "W", "C", "u", "g", "r", "i", "z", "y", "w",
-    ]
-    .into_iter()
-    .collect();
     for (i, o) in req.observations.iter().enumerate() {
         let n = i + 1;
         if [&o.perm_id, &o.prov_id, &o.trk_sub]
@@ -184,8 +219,17 @@ pub fn validate(req: &AdesRequest) -> Vec<String> {
                 e.push(format!("第 {n} 条 trkSub 不合法：{error}"));
             }
         }
+        if o.mode.trim().is_empty() {
+            e.push(format!("第 {n} 条缺少 mode"));
+        }
         if o.obs_time.trim().is_empty() {
             e.push(format!("第 {n} 条缺少 UTC 曝光中点"));
+        }
+        if !o.ra_deg.is_finite() || !(0.0..360.0).contains(&o.ra_deg) {
+            e.push(format!("第 {n} 条 RA 超出 [0, 360)"));
+        }
+        if !o.dec_deg.is_finite() || !(-90.0..=90.0).contains(&o.dec_deg) {
+            e.push(format!("第 {n} 条 Dec 超出 [-90, 90]"));
         }
         if !o.accepted_wcs {
             e.push(format!("第 {n} 条 WCS 未接受"));
@@ -193,16 +237,50 @@ pub fn validate(req: &AdesRequest) -> Vec<String> {
         if o.ast_cat != "Gaia3" {
             e.push(format!("第 {n} 条 astCat 必须为 Gaia3"));
         }
-        if o.mag.is_some() {
-            if !o.band.as_deref().is_some_and(|b| bands.contains(b)) {
-                e.push(format!("第 {n} 条星等缺少合法波段"));
+        if let Some(magnitude) = o.mag {
+            if !(-5.0..=35.0).contains(&magnitude) {
+                e.push(format!("第 {n} 条星等超出 ADES 允许的 -5.0..35.0"));
             }
-            if o.phot_cat.as_deref() != Some("ATLAS2") {
-                e.push(format!("第 {n} 条星等 photCat 必须为 ATLAS2"));
+            // The ADES photometry group requires `band` whenever `mag` is set.
+            if o.band
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                e.push(format!("第 {n} 条星等缺少 band"));
             }
         }
     }
     e
+}
+
+/// Non-blocking advisories. The MPC stays the authority on submissions, so the
+/// band table and name style are surfaced to the operator instead of blocking.
+pub fn warnings(req: &AdesRequest) -> Vec<String> {
+    let mut w = Vec::new();
+    for (i, o) in req.observations.iter().enumerate() {
+        let n = i + 1;
+        if o.mag.is_none() {
+            continue;
+        }
+        if let Some(band) = o.band.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
+            if !MPC_ACCEPTED_BANDS.contains(&band) {
+                w.push(format!(
+                    "第 {n} 条：波段 {band} 不在 MPC 当前接受的波段表内（C 已不再接受新提交）"
+                ));
+            }
+        }
+        if o.phot_cat
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .is_empty()
+        {
+            w.push(format!("第 {n} 条：有星等时建议提供 photCat"));
+        }
+    }
+    w
 }
 #[cfg(test)]
 mod tests {
@@ -251,7 +329,7 @@ mod tests {
             }],
         };
         assert_eq!(
-            render(&request).expect("valid ADES fixture"),
+            render(&request).expect("valid ADES fixture").content,
             include_str!("../tests/golden/ades-fixed.psv")
         );
     }

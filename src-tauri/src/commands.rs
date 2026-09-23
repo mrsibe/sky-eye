@@ -1747,7 +1747,9 @@ async fn active_orbits(
 
 #[tauri::command]
 pub fn preview_ades(request: crate::ades::AdesRequest) -> Result<String, String> {
-    crate::ades::render(&request).map_err(|e| e.join("；"))
+    crate::ades::render(&request)
+        .map(|report| report.content)
+        .map_err(|e| e.join("；"))
 }
 #[derive(Debug, Deserialize)]
 pub struct ExportAdesRequest {
@@ -1756,7 +1758,9 @@ pub struct ExportAdesRequest {
 }
 #[tauri::command]
 pub fn export_ades(request: ExportAdesRequest) -> Result<String, String> {
-    let content = crate::ades::render(&request.report).map_err(|e| e.join("；"))?;
+    let content = crate::ades::render(&request.report)
+        .map(|report| report.content)
+        .map_err(|e| e.join("；"))?;
     let path = std::path::Path::new(&request.destination);
     if path.extension().and_then(|s| s.to_str()) != Some("psv") {
         return Err("ADES export destination must use .psv extension".into());
@@ -1765,8 +1769,12 @@ pub fn export_ades(request: ExportAdesRequest) -> Result<String, String> {
     Ok(uuid::Uuid::new_v4().to_string())
 }
 
+/// Preview payload: the rendered text plus non-blocking advisories that the
+/// export dialog shows without disabling the export button.
 #[tauri::command]
-pub fn preview_report(request: crate::report::ReportRequest) -> Result<String, String> {
+pub fn preview_report(
+    request: crate::report::ReportRequest,
+) -> Result<crate::report::RenderedReport, String> {
     crate::report::writer(request.format)
         .render(&request.context, &request.observations)
         .map_err(|e| e.join("；"))
@@ -1781,7 +1789,8 @@ pub fn export_report(payload: ExportReportRequest) -> Result<String, String> {
     let writer = crate::report::writer(payload.request.format);
     let content = writer
         .render(&payload.request.context, &payload.request.observations)
-        .map_err(|e| e.join("；"))?;
+        .map_err(|e| e.join("；"))?
+        .content;
     let path = std::path::Path::new(&payload.destination);
     if path
         .extension()
@@ -1925,6 +1934,7 @@ async fn solve_frame(
                     cd2_2: hint.cd2_2,
                     image_width: data.width,
                     image_height: data.height,
+                    sip: None,
                 });
         (
             data.metadata.ra,
@@ -2196,6 +2206,7 @@ fn initial_wcs_seed(
         cd2_2,
         image_width,
         image_height,
+        sip: None,
     })
 }
 
@@ -2450,6 +2461,13 @@ pub fn export_solved_fits(
                 .and_then(|value| value.as_f64())
                 .ok_or_else(|| format!("stored WCS is missing {name}"))
         };
+        let sip = wcs
+            .get("sip")
+            .map(|value| {
+                serde_json::from_value::<crate::astrometry::wcs::SipDistortion>(value.clone())
+                    .map_err(|error| error.to_string())
+            })
+            .transpose()?;
         std::fs::copy(source_path, destination_path).map_err(|error| error.to_string())?;
         let write_result = (|| -> Result<(), String> {
             let mut file =
@@ -2468,16 +2486,41 @@ pub fn export_solved_fits(
                 hdu.write_key(&mut file, key, value)
                     .map_err(|error| error.to_string())?;
             }
-            hdu.write_key(&mut file, "CTYPE1", "RA---TAN")
-                .map_err(|error| error.to_string())?;
-            hdu.write_key(&mut file, "CTYPE2", "DEC--TAN")
-                .map_err(|error| error.to_string())?;
-            hdu.write_key(&mut file, "CUNIT1", "deg")
-                .map_err(|error| error.to_string())?;
-            hdu.write_key(&mut file, "CUNIT2", "deg")
-                .map_err(|error| error.to_string())?;
-            hdu.write_key(&mut file, "WCSNAME", "SKYEYE TAN/CD")
-                .map_err(|error| error.to_string())?;
+            if let Some(sip) = &sip {
+                hdu.write_key(&mut file, "CTYPE1", "RA---TAN-SIP")
+                    .map_err(|error| error.to_string())?;
+                hdu.write_key(&mut file, "CTYPE2", "DEC--TAN-SIP")
+                    .map_err(|error| error.to_string())?;
+                hdu.write_key(&mut file, "A_ORDER", sip.a_order as i32)
+                    .map_err(|error| error.to_string())?;
+                hdu.write_key(&mut file, "B_ORDER", sip.b_order as i32)
+                    .map_err(|error| error.to_string())?;
+                for (p, q, value) in sip.a_terms() {
+                    hdu.write_key(&mut file, &format!("A_{p}_{q}"), value)
+                        .map_err(|error| error.to_string())?;
+                }
+                for (p, q, value) in sip.b_terms() {
+                    hdu.write_key(&mut file, &format!("B_{p}_{q}"), value)
+                        .map_err(|error| error.to_string())?;
+                }
+                hdu.write_key(&mut file, "CUNIT1", "deg")
+                    .map_err(|error| error.to_string())?;
+                hdu.write_key(&mut file, "CUNIT2", "deg")
+                    .map_err(|error| error.to_string())?;
+                hdu.write_key(&mut file, "WCSNAME", "SKYEYE TAN/CD/SIP")
+                    .map_err(|error| error.to_string())?;
+            } else {
+                hdu.write_key(&mut file, "CTYPE1", "RA---TAN")
+                    .map_err(|error| error.to_string())?;
+                hdu.write_key(&mut file, "CTYPE2", "DEC--TAN")
+                    .map_err(|error| error.to_string())?;
+                hdu.write_key(&mut file, "CUNIT1", "deg")
+                    .map_err(|error| error.to_string())?;
+                hdu.write_key(&mut file, "CUNIT2", "deg")
+                    .map_err(|error| error.to_string())?;
+                hdu.write_key(&mut file, "WCSNAME", "SKYEYE TAN/CD")
+                    .map_err(|error| error.to_string())?;
+            }
             hdu.write_key(
                 &mut file,
                 "HISTORY",
