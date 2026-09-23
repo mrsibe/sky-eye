@@ -1925,6 +1925,7 @@ async fn solve_frame(
                     cd2_2: hint.cd2_2,
                     image_width: data.width,
                     image_height: data.height,
+                    sip: None,
                 });
         (
             data.metadata.ra,
@@ -2196,6 +2197,7 @@ fn initial_wcs_seed(
         cd2_2,
         image_width,
         image_height,
+        sip: None,
     })
 }
 
@@ -2450,6 +2452,13 @@ pub fn export_solved_fits(
                 .and_then(|value| value.as_f64())
                 .ok_or_else(|| format!("stored WCS is missing {name}"))
         };
+        let sip = wcs
+            .get("sip")
+            .map(|value| {
+                serde_json::from_value::<crate::astrometry::wcs::SipDistortion>(value.clone())
+                    .map_err(|error| error.to_string())
+            })
+            .transpose()?;
         std::fs::copy(source_path, destination_path).map_err(|error| error.to_string())?;
         let write_result = (|| -> Result<(), String> {
             let mut file =
@@ -2468,16 +2477,41 @@ pub fn export_solved_fits(
                 hdu.write_key(&mut file, key, value)
                     .map_err(|error| error.to_string())?;
             }
-            hdu.write_key(&mut file, "CTYPE1", "RA---TAN")
-                .map_err(|error| error.to_string())?;
-            hdu.write_key(&mut file, "CTYPE2", "DEC--TAN")
-                .map_err(|error| error.to_string())?;
-            hdu.write_key(&mut file, "CUNIT1", "deg")
-                .map_err(|error| error.to_string())?;
-            hdu.write_key(&mut file, "CUNIT2", "deg")
-                .map_err(|error| error.to_string())?;
-            hdu.write_key(&mut file, "WCSNAME", "SKYEYE TAN/CD")
-                .map_err(|error| error.to_string())?;
+            if let Some(sip) = &sip {
+                hdu.write_key(&mut file, "CTYPE1", "RA---TAN-SIP")
+                    .map_err(|error| error.to_string())?;
+                hdu.write_key(&mut file, "CTYPE2", "DEC--TAN-SIP")
+                    .map_err(|error| error.to_string())?;
+                hdu.write_key(&mut file, "A_ORDER", sip.a_order as i32)
+                    .map_err(|error| error.to_string())?;
+                hdu.write_key(&mut file, "B_ORDER", sip.b_order as i32)
+                    .map_err(|error| error.to_string())?;
+                for (p, q, value) in sip.a_terms() {
+                    hdu.write_key(&mut file, &format!("A_{p}_{q}"), value)
+                        .map_err(|error| error.to_string())?;
+                }
+                for (p, q, value) in sip.b_terms() {
+                    hdu.write_key(&mut file, &format!("B_{p}_{q}"), value)
+                        .map_err(|error| error.to_string())?;
+                }
+                hdu.write_key(&mut file, "CUNIT1", "deg")
+                    .map_err(|error| error.to_string())?;
+                hdu.write_key(&mut file, "CUNIT2", "deg")
+                    .map_err(|error| error.to_string())?;
+                hdu.write_key(&mut file, "WCSNAME", "SKYEYE TAN/CD/SIP")
+                    .map_err(|error| error.to_string())?;
+            } else {
+                hdu.write_key(&mut file, "CTYPE1", "RA---TAN")
+                    .map_err(|error| error.to_string())?;
+                hdu.write_key(&mut file, "CTYPE2", "DEC--TAN")
+                    .map_err(|error| error.to_string())?;
+                hdu.write_key(&mut file, "CUNIT1", "deg")
+                    .map_err(|error| error.to_string())?;
+                hdu.write_key(&mut file, "CUNIT2", "deg")
+                    .map_err(|error| error.to_string())?;
+                hdu.write_key(&mut file, "WCSNAME", "SKYEYE TAN/CD")
+                    .map_err(|error| error.to_string())?;
+            }
             hdu.write_key(
                 &mut file,
                 "HISTORY",

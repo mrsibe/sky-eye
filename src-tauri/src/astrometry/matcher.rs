@@ -393,6 +393,7 @@ pub fn solve_near_field(
         cd2_2: affine.y_y,
         image_width,
         image_height,
+        sip: None,
     };
     Ok(AstrometricSolution {
         wcs,
@@ -490,6 +491,7 @@ pub fn refine_from_wcs_seed(
             cd2_2: affine.y_y,
             image_width: seed.image_width,
             image_height: seed.image_height,
+            sip: None,
         },
         matches,
         rms_arcsec,
@@ -1145,6 +1147,7 @@ mod tests {
             cd2_2: 1.12 / 3_600.0,
             image_width: 1024,
             image_height: 768,
+            sip: None,
         };
         let mut image = Vec::new();
         let mut catalog = Vec::new();
