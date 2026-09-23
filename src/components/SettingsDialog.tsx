@@ -71,6 +71,8 @@ const reportBandOptions = [
   { value: 'z', label: 'z (Sloan)', system: 'Sloan' },
 ]
 
+const reservedReductionHint = '预留设置，对应功能尚未落地，解算暂不读取，修改不生效。'
+
 function optionalNumber(value: string): number | undefined {
   if (!value.trim()) return undefined
   const parsed = Number(value)
@@ -872,10 +874,11 @@ export function SettingsDialog({
                         }
                       />
                     </Field>
-                    <Field label="质心收敛 RMS">
+                    <Field label="质心收敛 RMS" hint={reservedReductionHint}>
                       <Input
                         type="number"
                         step="0.01"
+                        disabled
                         value={draft.reduction.maximum_centroid_fit_rms}
                         onChange={(e) =>
                           setDraft({
@@ -888,10 +891,11 @@ export function SettingsDialog({
                         }
                       />
                     </Field>
-                    <Field label="质心搜索半径 · px">
+                    <Field label="质心搜索半径 · px" hint={reservedReductionHint}>
                       <Input
                         type="number"
                         step="0.05"
+                        disabled
                         value={draft.reduction.centroid_search_radius_px}
                         onChange={(e) =>
                           setDraft({
@@ -904,8 +908,9 @@ export function SettingsDialog({
                         }
                       />
                     </Field>
-                    <Field label="质心方法">
+                    <Field label="质心方法" hint={reservedReductionHint}>
                       <Select
+                        disabled
                         value={draft.reduction.centroid_method}
                         onChange={(e) =>
                           setDraft({
@@ -927,7 +932,7 @@ export function SettingsDialog({
                     Gaia DR3 匹配
                   </h3>
                   <div className="grid grid-cols-3 gap-3">
-                    <Field label="天文星表">
+                    <Field label="天文星表" hint={reservedReductionHint}>
                       <Input value="Gaia DR3" disabled />
                     </Field>
                     <Field label="亮端限制 · G">
@@ -977,10 +982,11 @@ export function SettingsDialog({
                         }
                       />
                     </Field>
-                    <Field label="初始匹配半径 · px">
+                    <Field label="初始匹配半径 · px" hint={reservedReductionHint}>
                       <Input
                         type="number"
                         step="0.1"
+                        disabled
                         value={draft.reduction.initial_match_radius_px}
                         onChange={(e) =>
                           setDraft({
@@ -1009,8 +1015,9 @@ export function SettingsDialog({
                         }
                       />
                     </Field>
-                    <Field label="WCS 模型">
+                    <Field label="WCS 模型" hint={reservedReductionHint}>
                       <Select
+                        disabled
                         value={draft.reduction.plate_model}
                         onChange={(e) =>
                           setDraft({
@@ -1027,9 +1034,10 @@ export function SettingsDialog({
                         <option value="cubic">三次</option>
                       </Select>
                     </Field>
-                    <Field label="图像对齐参考星">
+                    <Field label="图像对齐参考星" hint={reservedReductionHint}>
                       <Input
                         type="number"
+                        disabled
                         value={draft.reduction.alignment_reference_stars}
                         onChange={(e) =>
                           setDraft({

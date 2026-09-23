@@ -605,4 +605,134 @@ mod tests {
         assert!(!config.report.position_precision_1e6_deg);
         assert!(!config.report.magnitude_precision_hundredth);
     }
+
+    fn is_identifier_char(character: char) -> bool {
+        character.is_alphanumeric() || character == '_'
+    }
+
+    fn contains_identifier(haystack: &str, needle: &str) -> bool {
+        haystack.match_indices(needle).any(|(start, _)| {
+            let before = haystack[..start].chars().next_back();
+            let after = haystack[start + needle.len()..].chars().next();
+            !before.is_some_and(is_identifier_char) && !after.is_some_and(is_identifier_char)
+        })
+    }
+
+    fn declared_fields(source: &str, struct_name: &str) -> Vec<String> {
+        let marker = format!("pub struct {struct_name} {{");
+        let Some(start) = source.find(&marker) else {
+            panic!("{struct_name} not found in storage.rs");
+        };
+        let body_start = start + marker.len();
+        let Some(relative_end) = source[body_start..].find('}') else {
+            panic!("{struct_name} body is not terminated");
+        };
+        let body_end = body_start + relative_end;
+        source[body_start..body_end]
+            .lines()
+            .filter_map(|line| {
+                let rest = line.trim().strip_prefix("pub ")?;
+                let name = rest.split(':').next()?.trim();
+                if name.is_empty() || !name.chars().all(is_identifier_char) {
+                    return None;
+                }
+                Some(name.to_string())
+            })
+            .collect()
+    }
+
+    fn collect_rust_sources(dir: &Path, exclude: &str, out: &mut Vec<String>) {
+        let mut entries: Vec<_> = fs::read_dir(dir)
+            .expect("read source directory")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .collect();
+        entries.sort();
+        for path in entries {
+            if path.is_dir() {
+                collect_rust_sources(&path, exclude, out);
+            } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs")
+                && path.file_name().and_then(|name| name.to_str()) != Some(exclude)
+            {
+                out.push(fs::read_to_string(&path).expect("read Rust source file"));
+            }
+        }
+    }
+
+    #[test]
+    fn settings_consumption_audit() {
+        // Every ReductionConfig field must be read by another Rust source file,
+        // or be listed here as pending wiring. The settings dialog exposes these
+        // knobs, so silently ignoring one would mislead operators.
+        const PENDING_WIRING: &[(&str, &str)] = &[
+            (
+                "plate_model",
+                "reserved for the unlanded SIP plate-model work; the solver always fits a 6-parameter affine today",
+            ),
+            (
+                "astrometry_catalog",
+                "single-valued (Gaia3); only Gaia DR3 is implemented",
+            ),
+            (
+                "maximum_centroid_fit_rms",
+                "leftover from an unimplemented 2-D Gaussian PSF-fit centroid path; the shipped centroid is the Gaussian-window centroid",
+            ),
+            (
+                "centroid_search_radius_px",
+                "leftover from an unimplemented 2-D Gaussian PSF-fit centroid path; the shipped centroid is the Gaussian-window centroid",
+            ),
+            (
+                "centroid_method",
+                "leftover from an unimplemented 2-D Gaussian PSF-fit centroid path; the shipped centroid is the Gaussian-window centroid",
+            ),
+            (
+                "initial_match_radius_px",
+                "solver tolerance wiring needs a validated scientific decision",
+            ),
+            (
+                "alignment_reference_stars",
+                "manual-alignment reference-star count is hardcoded to match the solver seeded path; wiring needs a solver-side cap",
+            ),
+        ];
+
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let source_dir = manifest_dir.join("src");
+        let storage_source =
+            fs::read_to_string(source_dir.join("storage.rs")).expect("read storage.rs");
+
+        let mut fields = Vec::new();
+        fields.extend(declared_fields(&storage_source, "ReductionConfig"));
+        assert!(!fields.is_empty(), "no ReductionConfig fields were parsed");
+
+        let mut other_sources = Vec::new();
+        collect_rust_sources(&source_dir, "storage.rs", &mut other_sources);
+        let consumers = other_sources.join("\n");
+
+        let offending: Vec<&str> = fields
+            .iter()
+            .map(|field| field.as_str())
+            .filter(|field| {
+                !contains_identifier(&consumers, field)
+                    && !PENDING_WIRING.iter().any(|entry| entry.0 == *field)
+            })
+            .collect();
+        assert!(
+            offending.is_empty(),
+            "ReductionConfig fields with no Rust consumer and no PENDING_WIRING entry: {}",
+            offending.join(", ")
+        );
+
+        for entry in PENDING_WIRING {
+            assert!(
+                fields.iter().any(|field| field.as_str() == entry.0),
+                "PENDING_WIRING entry {:?} is not a declared ReductionConfig field",
+                entry.0
+            );
+            assert!(
+                !contains_identifier(&consumers, entry.0),
+                "PENDING_WIRING entry {:?} is stale: it now has a Rust consumer",
+                entry.0
+            );
+        }
+    }
 }
