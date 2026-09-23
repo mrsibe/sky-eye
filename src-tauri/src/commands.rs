@@ -1747,7 +1747,9 @@ async fn active_orbits(
 
 #[tauri::command]
 pub fn preview_ades(request: crate::ades::AdesRequest) -> Result<String, String> {
-    crate::ades::render(&request).map_err(|e| e.join("；"))
+    crate::ades::render(&request)
+        .map(|report| report.content)
+        .map_err(|e| e.join("；"))
 }
 #[derive(Debug, Deserialize)]
 pub struct ExportAdesRequest {
@@ -1756,7 +1758,9 @@ pub struct ExportAdesRequest {
 }
 #[tauri::command]
 pub fn export_ades(request: ExportAdesRequest) -> Result<String, String> {
-    let content = crate::ades::render(&request.report).map_err(|e| e.join("；"))?;
+    let content = crate::ades::render(&request.report)
+        .map(|report| report.content)
+        .map_err(|e| e.join("；"))?;
     let path = std::path::Path::new(&request.destination);
     if path.extension().and_then(|s| s.to_str()) != Some("psv") {
         return Err("ADES export destination must use .psv extension".into());
@@ -1765,8 +1769,12 @@ pub fn export_ades(request: ExportAdesRequest) -> Result<String, String> {
     Ok(uuid::Uuid::new_v4().to_string())
 }
 
+/// Preview payload: the rendered text plus non-blocking advisories that the
+/// export dialog shows without disabling the export button.
 #[tauri::command]
-pub fn preview_report(request: crate::report::ReportRequest) -> Result<String, String> {
+pub fn preview_report(
+    request: crate::report::ReportRequest,
+) -> Result<crate::report::RenderedReport, String> {
     crate::report::writer(request.format)
         .render(&request.context, &request.observations)
         .map_err(|e| e.join("；"))
@@ -1781,7 +1789,8 @@ pub fn export_report(payload: ExportReportRequest) -> Result<String, String> {
     let writer = crate::report::writer(payload.request.format);
     let content = writer
         .render(&payload.request.context, &payload.request.observations)
-        .map_err(|e| e.join("；"))?;
+        .map_err(|e| e.join("；"))?
+        .content;
     let path = std::path::Path::new(&payload.destination);
     if path
         .extension()

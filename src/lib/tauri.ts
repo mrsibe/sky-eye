@@ -329,11 +329,20 @@ export interface ReportObservation {
   astrometric_reference_stars?: number
   accepted_wcs: boolean
 }
+export interface RenderedReport {
+  content: string
+  warnings: string[]
+}
+/**
+ * Advisory notes raised while rendering, e.g. a magnitude band the MPC no
+ * longer accepts or a name that does not look like "initials + surname".
+ * They never block an export.
+ */
 export async function previewReport(
   format: ReportFormat,
   context: ReportContext,
   observations: ReportObservation[],
-): Promise<string> {
+): Promise<RenderedReport> {
   return invoke('preview_report', { request: { format, context, observations } })
 }
 export async function exportReport(

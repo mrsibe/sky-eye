@@ -67,13 +67,30 @@ pub struct ReportRequest {
     pub observations: Vec<ReportObservation>,
 }
 
+/// A rendered report plus the non-blocking advisories collected while writing it.
+///
+/// Warnings never block an export: the MPC stays the authority on whether a
+/// submission is acceptable, and a local heuristic must not overrule it.
+#[derive(Debug, Clone, Serialize)]
+pub struct RenderedReport {
+    pub content: String,
+    pub warnings: Vec<String>,
+}
+
+/// Magnitude bands the MPC currently accepts for new submissions. The
+/// formerly-used `C` band ("clear"/no filter) was retired for new submissions.
+pub const MPC_ACCEPTED_BANDS: [&str; 22] = [
+    "B", "V", "R", "I", "J", "W", "U", "L", "H", "K", "Y", "G", "g", "r", "i", "w", "y", "z", "o",
+    "c", "v", "u",
+];
+
 pub trait ObservationReportWriter {
     fn extension(&self) -> &'static str;
     fn render(
         &self,
         context: &ReportContext,
         observations: &[ReportObservation],
-    ) -> Result<String, Vec<String>>;
+    ) -> Result<RenderedReport, Vec<String>>;
 }
 pub struct AdesPsvWriter;
 pub struct Mpc80Writer;
@@ -81,7 +98,11 @@ impl ObservationReportWriter for AdesPsvWriter {
     fn extension(&self) -> &'static str {
         "psv"
     }
-    fn render(&self, c: &ReportContext, rows: &[ReportObservation]) -> Result<String, Vec<String>> {
+    fn render(
+        &self,
+        c: &ReportContext,
+        rows: &[ReportObservation],
+    ) -> Result<RenderedReport, Vec<String>> {
         crate::ades::render(&to_ades(c, rows))
     }
 }
@@ -89,7 +110,11 @@ impl ObservationReportWriter for Mpc80Writer {
     fn extension(&self) -> &'static str {
         "txt"
     }
-    fn render(&self, c: &ReportContext, rows: &[ReportObservation]) -> Result<String, Vec<String>> {
+    fn render(
+        &self,
+        c: &ReportContext,
+        rows: &[ReportObservation],
+    ) -> Result<RenderedReport, Vec<String>> {
         render_mpc80(c, rows)
     }
 }
@@ -153,9 +178,13 @@ fn to_ades(c: &ReportContext, rows: &[ReportObservation]) -> AdesRequest {
     }
 }
 
-fn render_mpc80(c: &ReportContext, rows: &[ReportObservation]) -> Result<String, Vec<String>> {
+fn render_mpc80(
+    c: &ReportContext,
+    rows: &[ReportObservation],
+) -> Result<RenderedReport, Vec<String>> {
     let stn = c.observatory_code.trim();
     let mut errors = Vec::new();
+    let mut warnings = Vec::new();
     if stn.eq_ignore_ascii_case("XXX") {
         errors.push("MPC 台站代码仍为占位值 XXX".into());
     } else if stn.len() != 3 || !stn.is_ascii() {
@@ -165,8 +194,8 @@ fn render_mpc80(c: &ReportContext, rows: &[ReportObservation]) -> Result<String,
         errors.push("没有可导出的观测".into());
     }
     let mut lines = vec![format!("COD {stn}")];
-    append_header_names(&mut lines, "OBS", &c.observers, &mut errors);
-    append_header_names(&mut lines, "MEA", &c.measurers, &mut errors);
+    append_header_names(&mut lines, "OBS", &c.observers, &mut errors, &mut warnings);
+    append_header_names(&mut lines, "MEA", &c.measurers, &mut errors, &mut warnings);
     if let Some(telescope) = c
         .telescope
         .as_deref()
@@ -194,13 +223,54 @@ fn render_mpc80(c: &ReportContext, rows: &[ReportObservation]) -> Result<String,
             Ok(v) => lines.push(v),
             Err(e) => errors.push(format!("第 {} 条：{e}", i + 1)),
         }
+        if o.magnitude.is_some() {
+            if let Some(band) = o.band.as_deref() {
+                if !MPC_ACCEPTED_BANDS.contains(&band) {
+                    warnings.push(format!(
+                        "第 {} 条：波段 {band} 不在 MPC 当前接受的波段表内（C 已不再接受新提交）",
+                        i + 1
+                    ));
+                }
+            }
+        }
     }
     if errors.is_empty() {
         lines.push("----- end -----".into());
-        Ok(lines.join("\r\n") + "\r\n")
+        Ok(RenderedReport {
+            content: lines.join("\r\n") + "\r\n",
+            warnings,
+        })
     } else {
         Err(errors)
     }
+}
+
+/// MPC expects names as "initials + surname" (`J. M. Doe`), never an all-caps
+/// form or a full given name. These are advisories only: the MPC may still
+/// accept a name we cannot parse confidently, so we never block on them.
+fn name_style_warnings(keyword: &str, name: &str) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let letters: Vec<char> = name.chars().filter(|c| c.is_ascii_alphabetic()).collect();
+    if letters.len() > 1 && letters.iter().all(|c| c.is_ascii_uppercase()) {
+        warnings.push(format!(
+            "{keyword} 姓名「{name}」疑似全大写，MPC 要求写作「缩写. 姓」"
+        ));
+    }
+    if name
+        .char_indices()
+        .any(|(i, c)| c == '.' && name[i + 1..].chars().next().is_some_and(|next| next != ' '))
+    {
+        warnings.push(format!(
+            "{keyword} 姓名「{name}」的缩写之间缺少空格，MPC 要求写作「J. M. Doe」"
+        ));
+    }
+    let first = name.split_whitespace().next().unwrap_or_default();
+    if first.len() > 1 && !first.ends_with('.') {
+        warnings.push(format!(
+            "{keyword} 姓名「{name}」疑似使用全名而非缩写首字母，MPC 要求写作「J. Doe」"
+        ));
+    }
+    warnings
 }
 
 fn append_header_names(
@@ -208,6 +278,7 @@ fn append_header_names(
     keyword: &str,
     names: &[String],
     errors: &mut Vec<String>,
+    warnings: &mut Vec<String>,
 ) {
     if names.is_empty() {
         errors.push(format!("MPC 80-column 缺少 {keyword} 信息"));
@@ -222,6 +293,7 @@ fn append_header_names(
             ));
             return;
         }
+        warnings.extend(name_style_warnings(keyword, name));
         let separator = if line.len() == 4 { "" } else { ", " };
         if line.len() + separator.len() + name.len() > 80 {
             lines.push(line);
@@ -422,8 +494,8 @@ mod tests {
                 observers: vec!["J. Observer".into()],
                 measurers: vec!["M. Measurer".into()],
                 telescope: Some("1.8-m f/4.4 reflector + CCD".into()),
-                telescope_aperture_m: None,
-                detector: None,
+                telescope_aperture_m: Some(1.8),
+                detector: Some("CCD".into()),
                 software_version: "x".into(),
                 position_precision_1e6_deg: true,
                 magnitude_precision_hundredth: false,
@@ -459,7 +531,8 @@ mod tests {
         let r = request();
         let text = writer(r.format)
             .render(&r.context, &r.observations)
-            .unwrap();
+            .unwrap()
+            .content;
         let observation = text.lines().find(|line| line.len() == 80).unwrap();
         assert_eq!(observation.len(), 80)
     }
@@ -475,7 +548,8 @@ mod tests {
         r.observations[0].band = Some("G".into());
         let text = writer(r.format)
             .render(&r.context, &r.observations)
-            .unwrap();
+            .unwrap()
+            .content;
         assert!(text.starts_with("COD F51\r\nOBS J. Observer\r\nMEA M. Measurer\r\n"));
         assert!(text.contains("NET Gaia-DR3\r\n"));
         assert!(text.contains(
@@ -530,12 +604,88 @@ mod tests {
         r.observations[0].astrometric_reference_stars = Some(65);
         let text = writer(ReportFormat::Ades2022Psv)
             .render(&r.context, &r.observations)
-            .unwrap();
+            .unwrap()
+            .content;
         assert!(text.contains("# software\n! astrometry SkyEye 0.1.0"));
         assert!(text.contains("band|fltr|photCat"));
         assert!(text.contains("exp|rmsFit|nStars"));
         assert!(text.contains("239.153363|-23.212131"));
         assert!(text.contains("21.6||r|r|ATLAS2"));
         assert!(text.contains("0.087|65"));
+    }
+
+    #[test]
+    fn ades_requires_the_context_sections_the_schema_marks_mandatory() {
+        let mut r = request();
+        r.format = ReportFormat::Ades2022Psv;
+        r.context.measurers = vec![];
+        r.context.telescope = None;
+        r.context.telescope_aperture_m = None;
+        r.context.detector = None;
+        let errors = writer(r.format)
+            .render(&r.context, &r.observations)
+            .expect_err("ADES must reject a context missing mandatory sections");
+        assert!(errors.iter().any(|e| e.contains("measurers")));
+        assert!(errors.iter().any(|e| e.contains("telescope")));
+        assert!(errors.iter().any(|e| e.contains("aperture")));
+        assert!(errors.iter().any(|e| e.contains("detector")));
+    }
+
+    #[test]
+    fn ades_allows_an_empty_observer_list_because_the_schema_makes_it_optional() {
+        let mut r = request();
+        r.format = ReportFormat::Ades2022Psv;
+        r.context.observers = vec![];
+        assert!(writer(r.format).render(&r.context, &r.observations).is_ok());
+    }
+
+    #[test]
+    fn mpc80_keeps_requiring_observers() {
+        let mut r = request();
+        r.context.observers = vec![];
+        let errors = writer(r.format)
+            .render(&r.context, &r.observations)
+            .expect_err("MPC 80-column must reject an empty OBS header");
+        assert!(errors.iter().any(|e| e.contains("OBS")));
+    }
+
+    #[test]
+    fn retired_band_is_a_warning_not_a_blocker_for_both_writers() {
+        for format in [ReportFormat::Ades2022Psv, ReportFormat::Mpc1992_80Column] {
+            let mut r = request();
+            r.format = format;
+            r.observations[0].band = Some("C".into());
+            let report = writer(r.format)
+                .render(&r.context, &r.observations)
+                .expect("a retired band must not block an export");
+            assert!(report.warnings.iter().any(|w| w.contains("波段 C")));
+        }
+    }
+
+    #[test]
+    fn name_style_is_a_warning_not_a_blocker() {
+        let mut r = request();
+        r.context.observers = vec!["Vangelis Papathanassiou".into()];
+        let report = writer(r.format)
+            .render(&r.context, &r.observations)
+            .expect("an odd name must not block an export");
+        assert!(report.warnings.iter().any(|w| w.contains("疑似使用全名")));
+    }
+
+    #[test]
+    fn ades_accepts_any_photometric_catalog_and_warns_without_one() {
+        let mut r = request();
+        r.format = ReportFormat::Ades2022Psv;
+        r.observations[0].photometric_catalog = Some("Gaia3".into());
+        let report = writer(r.format)
+            .render(&r.context, &r.observations)
+            .expect("the schema does not pin photCat to a single catalog");
+        assert!(report.warnings.is_empty());
+
+        r.observations[0].photometric_catalog = None;
+        let report = writer(r.format)
+            .render(&r.context, &r.observations)
+            .expect("photCat is optional in the ADES photometry group");
+        assert!(report.warnings.iter().any(|w| w.contains("photCat")));
     }
 }
