@@ -31,7 +31,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ndarray = "0.17.2"
 num-traits = "0.2"
-imageproc = "0.25"
+imageproc = "0.27"
 tauri-plugin-dialog = "2.7.1"
 fitsio = { version = "0.21.10", features = ["array", "fitsio-src", "src-cmake"] }
 fitsio-sys = "0.5.7"
